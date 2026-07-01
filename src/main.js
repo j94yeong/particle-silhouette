@@ -31,8 +31,8 @@ const mctx = mask.getContext("2d", { willReadFrequently: true });
 
 // ---- Tunables ----
 const CFG = {
-  sampleW: 160, // mask sampling width (height derived from aspect)
-  step: 5, // particle grid stride in mask pixels (smaller = denser)
+  sampleW: 180, // mask sampling width (height derived from aspect)
+  step: 4, // particle grid stride in mask pixels (smaller = denser)
   ease: 0.16, // how fast particles seek their target
   friction: 0.86, // velocity damping
   pointerRadius: 110,
@@ -86,17 +86,26 @@ function buildParticles(mw, mh) {
 }
 
 // ---------- Layout ----------
-let scaleX = 1,
-  scaleY = 1; // mask space -> canvas space
+// Uniform "cover" mapping from mask space -> canvas space: one scale for both
+// axes (so the silhouette keeps its proportions instead of stretching) plus a
+// centering offset. Overflow is cropped, like CSS `object-fit: cover`.
+let scale = 1,
+  offX = 0,
+  offY = 0;
+// Explicit init flag: a fresh <canvas> defaults to width=300, so we can't use
+// `mask.width` as the "not sized yet" sentinel — it would never be falsy and the
+// particle grid would never get built.
+let sized = false;
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   canvas.width = Math.floor(window.innerWidth * dpr);
   canvas.height = Math.floor(window.innerHeight * dpr);
   canvas.style.width = window.innerWidth + "px";
   canvas.style.height = window.innerHeight + "px";
-  if (mask.width) {
-    scaleX = canvas.width / mask.width;
-    scaleY = canvas.height / mask.height;
+  if (sized) {
+    scale = Math.max(canvas.width / mask.width, canvas.height / mask.height);
+    offX = (canvas.width - mask.width * scale) / 2;
+    offY = (canvas.height - mask.height * scale) / 2;
   }
 }
 window.addEventListener("resize", resize);
@@ -141,16 +150,18 @@ function explode() {
 let latestMaskData = null;
 let maskReady = false;
 
+function sizeMaskTo(aspect) {
+  mask.width = CFG.sampleW;
+  mask.height = Math.max(1, Math.round(CFG.sampleW * aspect));
+  buildParticles(mask.width, mask.height);
+  sized = true; // must precede resize() — it gates the scale calc on `sized`
+  resize();
+}
+
 function onResults(results) {
   const seg = results.segmentationMask;
   if (!seg) return;
-  if (!mask.width) {
-    const aspect = seg.height / seg.width;
-    mask.width = CFG.sampleW;
-    mask.height = Math.round(CFG.sampleW * aspect);
-    buildParticles(mask.width, mask.height);
-    resize();
-  }
+  if (!sized) sizeMaskTo(seg.height / seg.width);
   // Mirror horizontally so it reads like a mirror by default.
   mctx.save();
   mctx.clearRect(0, 0, mask.width, mask.height);
@@ -165,10 +176,18 @@ function onResults(results) {
 }
 
 let selfieSeg = null;
+let mpLoaded = false;
 async function initSegmentation() {
+  if (selfieSeg) return; // guard against double-init on retry
   // Load the UMD as a classic script so Emscripten resolves its companion
   // assets relative to /mediapipe/ (see MP_BASE note at top of file).
-  await loadScript(MP_BASE + "selfie_segmentation.js");
+  if (!mpLoaded) {
+    await loadScript(MP_BASE + "selfie_segmentation.js");
+    mpLoaded = true;
+  }
+  if (typeof window.SelfieSegmentation !== "function") {
+    throw new Error("Segmentation library failed to load.");
+  }
   selfieSeg = new window.SelfieSegmentation({
     locateFile: (f) => MP_BASE + f,
   });
@@ -220,9 +239,11 @@ function render(now) {
   const palette = PALETTES[state.paletteIdx];
   const px = state.pointer;
   const pr = CFG.pointerRadius * (canvas.width / window.innerWidth);
+  const cell = CFG.step * scale; // on-screen spacing between grid cells
 
-  ctx.globalCompositeOperation = "lighter";
-
+  // Draw with source-over (not additive): the trail-fade above already gives
+  // motion glow, while opaque dots keep their true palette colour instead of
+  // accumulating to white where they sit still.
   for (let i = 0; i < state.particles.length; i++) {
     const p = state.particles[i];
     const inside = maskValueAt(p.mx, p.my) > CFG.maskThreshold;
@@ -239,9 +260,9 @@ function render(now) {
       p.vy += (Math.random() - 0.5) * 0.15 * dt;
     }
 
-    // Pointer repulsion (computed in canvas space).
-    const cx = p.x * scaleX,
-      cy = p.y * scaleY;
+    // Pointer repulsion (computed in canvas space, then fed back in mask space).
+    const cx = p.x * scale + offX,
+      cy = p.y * scale + offY;
     if (px.active) {
       const dx = cx - px.x,
         dy = cy - px.y;
@@ -249,8 +270,8 @@ function render(now) {
       if (d2 < pr * pr) {
         const d = Math.sqrt(d2) || 1;
         const f = (1 - d / pr) * CFG.pointerForce;
-        p.vx += ((dx / d) * f) / scaleX * dt;
-        p.vy += ((dy / d) * f) / scaleY * dt;
+        p.vx += ((dx / d) * f) / scale * dt;
+        p.vy += ((dy / d) * f) / scale * dt;
       }
     }
 
@@ -261,10 +282,13 @@ function render(now) {
 
     if (p.life < 0.04) continue; // skip nearly-invisible particles
 
-    const drawX = p.x * scaleX;
-    const drawY = p.y * scaleY;
+    const drawX = p.x * scale + offX;
+    const drawY = p.y * scale + offY;
     const color = palette[i % palette.length];
-    const r = (1.1 + p.life * 2.2) * (canvas.width / 1280) * 2;
+    // Radius scales with the on-screen cell size so particles fill the
+    // silhouette at any resolution. Kept below half a cell so dots stay distinct
+    // and their colours show, instead of the additive blend saturating to white.
+    const r = cell * (0.12 + p.life * 0.26);
 
     ctx.globalAlpha = Math.min(1, p.life);
     ctx.fillStyle = color;
@@ -274,11 +298,22 @@ function render(now) {
   }
 
   ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = "source-over";
 }
 
 // ---------- Boot ----------
 async function start() {
+  // The camera API is only exposed in a secure context (https:// or localhost).
+  // Catch this up front so phones on plain http get a clear message instead of
+  // a cryptic "Cannot read properties of undefined" from mediaDevices.
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    statusEl.style.color = "#ff9a9a";
+    statusEl.textContent =
+      location.protocol === "file:"
+        ? "Run via `npm run dev` — file:// blocks the camera."
+        : "Camera needs a secure context — open this over https:// or localhost.";
+    return;
+  }
+
   startBtn.disabled = true;
   statusEl.style.color = "#aab2d8";
   statusEl.textContent = "Requesting camera…";
@@ -297,22 +332,57 @@ async function start() {
     // stays responsive and shows the scene even before the first mask arrives —
     // we never block the overlay on a frame that might stall.
     state.running = true;
+    statusEl.textContent = "";
     overlay.classList.add("hidden");
     pumpCamera();
-    requestAnimationFrame(render);
   } catch (err) {
     startBtn.disabled = false;
     statusEl.style.color = "#ff9a9a";
     const name = err && err.name;
-    if (name === "NotAllowedError")
+    if (name === "NotAllowedError" || name === "SecurityError")
       statusEl.textContent = "Camera permission denied. Allow access and try again.";
-    else if (name === "NotFoundError")
+    else if (name === "NotFoundError" || name === "DevicesNotFoundError")
       statusEl.textContent = "No camera found on this device.";
-    else if (location.protocol === "file:")
-      statusEl.textContent = "Run via `npm run dev` — file:// blocks the camera.";
+    else if (name === "NotReadableError")
+      statusEl.textContent = "Camera is in use by another app. Close it and retry.";
     else statusEl.textContent = "Could not start camera: " + ((err && err.message) || err);
   }
 }
 
 startBtn.addEventListener("click", start);
 resize();
+
+// The render loop runs continuously and independently of the camera — it guards
+// on `maskReady`, so it simply fades an empty scene until masks start arriving.
+// Decoupling it keeps the UI responsive and makes the pipeline testable.
+requestAnimationFrame(render);
+
+// Debug seam (dev builds or `?debug`): lets tooling inspect and drive the sim
+// without a real person in frame. Stripped from normal production loads.
+if (import.meta.env.DEV || new URLSearchParams(location.search).has("debug")) {
+  window.__silhouette = {
+    state,
+    CFG,
+    // Inject a filled rectangular "person" so the particle pipeline can be
+    // exercised deterministically (used by the headless E2E check).
+    fillMask(frac = 0.6) {
+      if (!sized) sizeMaskTo(0.75);
+      const d = new Uint8ClampedArray(mask.width * mask.height * 4);
+      const x0 = mask.width * (0.5 - frac / 2),
+        x1 = mask.width * (0.5 + frac / 2);
+      const y0 = mask.height * (0.5 - frac / 2),
+        y1 = mask.height * (0.5 + frac / 2);
+      for (let y = 0; y < mask.height; y++) {
+        for (let x = 0; x < mask.width; x++) {
+          const inside = x >= x0 && x <= x1 && y >= y0 && y <= y1;
+          const idx = (y * mask.width + x) * 4;
+          d[idx] = d[idx + 1] = d[idx + 2] = inside ? 255 : 0;
+          d[idx + 3] = 255;
+        }
+      }
+      latestMaskData = d;
+      maskReady = true;
+      state.running = true;
+    },
+  };
+}
