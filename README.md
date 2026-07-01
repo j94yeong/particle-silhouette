@@ -11,10 +11,11 @@ never leaves your device.
 1. **Camera** — `getUserMedia` grabs the webcam (laptop or mobile front camera).
 2. **Silhouette** — [MediaPipe Selfie Segmentation](https://developers.google.com/mediapipe)
    produces a per-pixel "is this a person?" mask, live, fully on-device.
-3. **Particles** — a grid of particles samples the mask every frame. Particles whose
-   cell falls inside your body light up and snap to their home position, forming your
-   outline; particles outside drift and fade. It's continuous real-time tracking, not
-   a snapshot — move and the silhouette follows you.
+3. **Particles** — a full-screen field of particles is *always alive*, drifting
+   organically. Each frame it samples the mask: particles whose cell falls inside
+   your body gather onto their grid home and brighten, forming a filled figure;
+   when you leave the frame they disperse back into the ambient drift. It's
+   continuous real-time tracking, not a snapshot — move and the figure follows you.
 4. **Interaction** — move the mouse or drag a finger to push particles around.
 
 ### Why MediaPipe?
@@ -87,10 +88,13 @@ Edit the `CFG` object near the top of `src/main.js`:
 
 | Key             | Effect                                             |
 | --------------- | -------------------------------------------------- |
-| `step`          | Particle density (smaller = more particles)        |
-| `sampleW`       | Mask resolution (higher = sharper edge, slower)    |
-| `ease`          | How fast particles snap into the silhouette        |
-| `pointerRadius` | Reach of the mouse/touch repulsion                 |
-| `maskThreshold` | How confident a pixel must be to count as "person" |
+| `step`           | Particle density (smaller = more particles)        |
+| `sampleW`        | Mask resolution (higher = sharper edge, slower)    |
+| `ease`           | How fast particles gather into the silhouette      |
+| `ambientAmp`     | How far particles float in the resting field       |
+| `ambientScatter` | How scattered the resting field looks              |
+| `ambientEase`    | How gently particles follow their organic drift    |
+| `pointerRadius`  | Reach of the mouse/touch repulsion                 |
+| `maskThreshold`  | How confident a pixel must be to count as "person" |
 
 If it feels slow on a phone, raise `step` (e.g. `7`) and/or lower `sampleW`.

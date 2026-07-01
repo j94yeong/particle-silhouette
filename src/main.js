@@ -33,7 +33,10 @@ const mctx = mask.getContext("2d", { willReadFrequently: true });
 const CFG = {
   sampleW: 180, // mask sampling width (height derived from aspect)
   step: 4, // particle grid stride in mask pixels (smaller = denser)
-  ease: 0.16, // how fast particles seek their target
+  ease: 0.16, // how fast particles gather into the silhouette
+  ambientEase: 0.035, // how gently particles follow their organic drift
+  ambientScatter: 4, // resting-position spread in mask px (breaks up the grid)
+  ambientAmp: 2.6, // organic drift amplitude in mask px
   friction: 0.86, // velocity damping
   pointerRadius: 110,
   pointerForce: 2.6,
@@ -59,8 +62,9 @@ const state = {
 };
 
 // ---------- Particle pool ----------
-// One particle per grid cell. A cell that falls inside the silhouette pulls its
-// particle "home" and lights it up; outside cells let it drift.
+// One particle per grid cell. The field is always alive: each particle drifts
+// organically around a scattered resting spot, and gathers onto its crisp grid
+// "home" (mx,my) only while that cell is inside the silhouette.
 function buildParticles(mw, mh) {
   const parts = [];
   const cols = Math.floor(mw / CFG.step);
@@ -71,12 +75,16 @@ function buildParticles(mw, mh) {
       const my = gy * CFG.step + CFG.step / 2;
       parts.push({
         mx,
-        my, // home position in mask space
-        x: Math.random() * mw, // current position in mask space
-        y: Math.random() * mh,
+        my, // grid home (silhouette target) in mask space
+        // Static scatter so the resting field looks organic, not a rigid grid.
+        ox: (Math.random() - 0.5) * 2 * CFG.ambientScatter,
+        oy: (Math.random() - 0.5) * 2 * CFG.ambientScatter,
+        phase: Math.random() * Math.PI * 2, // desync the drift per particle
+        x: mx,
+        y: my,
         vx: 0,
         vy: 0,
-        life: 0, // 0..1 brightness, eased
+        life: 0, // 0..1 "formed-ness", eased
       });
     }
   }
@@ -240,6 +248,7 @@ function render(now) {
   const px = state.pointer;
   const pr = CFG.pointerRadius * (canvas.width / window.innerWidth);
   const cell = CFG.step * scale; // on-screen spacing between grid cells
+  const t = now / 1000; // seconds, for the organic drift
 
   // Draw with source-over (not additive): the trail-fade above already gives
   // motion glow, while opaque dots keep their true palette colour instead of
@@ -248,17 +257,24 @@ function render(now) {
     const p = state.particles[i];
     const inside = maskValueAt(p.mx, p.my) > CFG.maskThreshold;
 
-    // Brightness eases in/out so the body edge shimmers instead of snapping.
-    p.life += ((inside ? 1 : 0) - p.life) * 0.12 * dt;
+    // "formed-ness" eases in/out so the body gathers and disperses smoothly.
+    p.life += ((inside ? 1 : 0) - p.life) * 0.1 * dt;
 
-    // Seek home when inside; gently drift outward when not.
+    // Target: the crisp grid home when inside the silhouette, otherwise an
+    // organic resting spot (scattered anchor + slow layered-sine wander).
+    let tx, ty, seek;
     if (inside) {
-      p.vx += (p.mx - p.x) * CFG.ease * dt;
-      p.vy += (p.my - p.y) * CFG.ease * dt;
+      tx = p.mx;
+      ty = p.my;
+      seek = CFG.ease;
     } else {
-      p.vx += (Math.random() - 0.5) * 0.15 * dt;
-      p.vy += (Math.random() - 0.5) * 0.15 * dt;
+      const a = CFG.ambientAmp;
+      tx = p.mx + p.ox + Math.cos(t * 0.6 + p.phase) * a + Math.sin(t * 0.23 + p.phase * 1.7) * a * 0.5;
+      ty = p.my + p.oy + Math.sin(t * 0.5 + p.phase) * a + Math.cos(t * 0.19 + p.phase * 1.3) * a * 0.5;
+      seek = CFG.ambientEase;
     }
+    p.vx += (tx - p.x) * seek * dt;
+    p.vy += (ty - p.y) * seek * dt;
 
     // Pointer repulsion (computed in canvas space, then fed back in mask space).
     const cx = p.x * scale + offX,
@@ -280,17 +296,14 @@ function render(now) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
 
-    if (p.life < 0.04) continue; // skip nearly-invisible particles
-
     const drawX = p.x * scale + offX;
     const drawY = p.y * scale + offY;
     const color = palette[i % palette.length];
-    // Radius scales with the on-screen cell size so particles fill the
-    // silhouette at any resolution. Kept below half a cell so dots stay distinct
-    // and their colours show, instead of the additive blend saturating to white.
-    const r = cell * (0.12 + p.life * 0.26);
+    // Always visible: a soft ambient dot that grows and brightens as it forms
+    // the silhouette. Radius kept below half a cell so dots stay distinct.
+    const r = cell * (0.1 + p.life * 0.28);
 
-    ctx.globalAlpha = Math.min(1, p.life);
+    ctx.globalAlpha = 0.28 + p.life * 0.67;
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.arc(drawX, drawY, r, 0, Math.PI * 2);
@@ -381,6 +394,13 @@ if (import.meta.env.DEV || new URLSearchParams(location.search).has("debug")) {
         }
       }
       latestMaskData = d;
+      maskReady = true;
+      state.running = true;
+    },
+    // Empty mask → nobody in frame → the ambient drifting field.
+    emptyMask() {
+      if (!sized) sizeMaskTo(0.75);
+      latestMaskData = new Uint8ClampedArray(mask.width * mask.height * 4);
       maskReady = true;
       state.running = true;
     },
