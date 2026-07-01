@@ -1,4 +1,21 @@
-import { SelfieSegmentation } from "@mediapipe/selfie_segmentation";
+// NOTE: MediaPipe's package is an Emscripten UMD bundle that loads its own
+// .wasm/.tflite/.data companion files at runtime, resolved relative to the
+// location of selfie_segmentation.js. If we `import` it, Vite inlines the JS and
+// Emscripten loses that script directory, so it requests the companions from the
+// wrong path and the graph silently stalls. Loading it as a classic <script>
+// from our self-hosted /mediapipe/ folder keeps that resolution correct.
+const MP_BASE = `${import.meta.env.BASE_URL}mediapipe/`;
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.crossOrigin = "anonymous";
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Failed to load " + src));
+    document.head.appendChild(s);
+  });
+}
 
 const video = document.getElementById("cam");
 const canvas = document.getElementById("scene");
@@ -148,11 +165,12 @@ function onResults(results) {
 }
 
 let selfieSeg = null;
-function initSegmentation() {
-  selfieSeg = new SelfieSegmentation({
-    // Self-hosted assets copied out of node_modules by vite-plugin-static-copy.
-    // BASE_URL keeps this correct under a GitHub Pages subpath.
-    locateFile: (f) => `${import.meta.env.BASE_URL}mediapipe/${f}`,
+async function initSegmentation() {
+  // Load the UMD as a classic script so Emscripten resolves its companion
+  // assets relative to /mediapipe/ (see MP_BASE note at top of file).
+  await loadScript(MP_BASE + "selfie_segmentation.js");
+  selfieSeg = new window.SelfieSegmentation({
+    locateFile: (f) => MP_BASE + f,
   });
   selfieSeg.setOptions({ modelSelection: 1 }); // 1 = general (full body)
   selfieSeg.onResults(onResults);
@@ -273,10 +291,11 @@ async function start() {
     await video.play();
 
     statusEl.textContent = "Loading segmentation model…";
-    initSegmentation();
-    // Warm up one frame so the model + mask canvas initialize.
-    await selfieSeg.send({ image: video });
+    await initSegmentation();
 
+    // Hand off immediately: the render loop guards on `maskReady`, so the UI
+    // stays responsive and shows the scene even before the first mask arrives —
+    // we never block the overlay on a frame that might stall.
     state.running = true;
     overlay.classList.add("hidden");
     pumpCamera();
