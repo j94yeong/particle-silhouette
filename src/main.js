@@ -233,6 +233,10 @@ function render(now) {
   const dt = Math.min(2, (now - lastT) / 16.67);
   lastT = now;
 
+  // Freeze on pause: return before the fade so the last frame stays on screen
+  // (running the fade while not redrawing would dissolve everything to black).
+  if (state.paused) return;
+
   const fps = 1000 / Math.max(1, now - (prevFrameT || now));
   prevFrameT = now;
   fpsSmooth = fpsSmooth ? fpsSmooth * 0.9 + fps * 0.1 : fps;
@@ -242,7 +246,7 @@ function render(now) {
   ctx.fillStyle = "rgba(5, 6, 10, 0.28)";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  if (!maskReady || state.paused) return;
+  if (!maskReady) return;
 
   const palette = PALETTES[state.paletteIdx];
   const px = state.pointer;
